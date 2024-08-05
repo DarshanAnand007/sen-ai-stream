@@ -1,252 +1,114 @@
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
-import sqlite3
-import PyPDF2
-import pytesseract
-from pdf2image import convert_from_path
 import streamlit as st
-from pptx import Presentation
-from docx import Document
-from PIL import Image
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from langchain.chains import ConversationalRetrievalChain
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain.memory import ConversationBufferMemory
-from langchain_groq import ChatGroq
+from typing import Generator
+from groq import Groq
+
+st.set_page_config(page_icon="💬", layout="wide",
+                   page_title="SEN")
 
 
-# Set up page configuration's
-st.set_page_config(page_icon="📄", layout="wide", page_title="PDF Conversational AI")
 
-# Access the API key from Streamlit secrets
-try:
-    groq_api_key = st.secrets["groq"]["api_key"]
-except KeyError:
-    st.error("API key for GROQ is missing. Please check your secrets configuration.")
-    st.stop()
 
-# Initialize GROQ chat with the provided API key, model name, and settings
-try:
-    llm_groq = ChatGroq(
-        groq_api_key=groq_api_key,
-        model_name="Gemma2-9b-it",
-        temperature=0.2
+st.subheader("SEN AI",  anchor=False)
+st.text("near real-time responses")
+
+client = Groq(
+    api_key=st.secrets["GROQ_API_KEY"],
+)
+
+# Initialize chat history and selected model
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "selected_model" not in st.session_state:
+    st.session_state.selected_model = None
+
+# Define model details
+models = {
+    "gemma-7b-it": {"name": "Gemma-7b", "tokens": 8192, "developer": "Google"},
+    "llama3-70b-8192": {"name": "LLaMA3 70b", "tokens": 8192, "developer": "Meta"},
+    "llama3-8b-8192": {"name": "LLaMA3 8b", "tokens": 8192, "developer": "Meta"},
+    "mixtral-8x7b-32768": {"name": "Mixtral 8x7b", "tokens": 32768, "developer": "Mistral"},
+}
+
+
+with st.sidebar:
+    st.title("Chat configuration")
+
+    model_option = st.selectbox(
+        "Choose a model you want to chat with:",
+        options=list(models.keys()),
+        format_func=lambda x: models[x]["name"],
+        index=2  # Default to llama
     )
-except Exception as e:
-    st.error(f"Failed to initialize GROQ chat: {e}")
-    st.stop()
 
-# Initialize the SQLite database
-conn = sqlite3.connect('file_history.db')
-c = conn.cursor()
+    if st.session_state.selected_model != model_option:
+        st.session_state.messages = []
+        st.session_state.selected_model = model_option
 
-# Create or alter tables if they do not exist
-c.execute('''CREATE TABLE IF NOT EXISTS uploaded_files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                file_name TEXT UNIQUE
-            )''')
+    max_tokens_range = models[model_option]["tokens"]
 
-c.execute('''CREATE TABLE IF NOT EXISTS chat_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                question TEXT,
-                answer TEXT
-            )''')
-conn.commit()
+    max_tokens = st.slider(
+        "Max Tokens:",
+        min_value=512,  # Minimum value to allow some flexibility
+        max_value=max_tokens_range,
+        # Default value or max allowed if less
+        value=min(32768, max_tokens_range),
+        step=512,
+        help=f"Adjust the maximum number of tokens (words) for the model's response. Max for selected model: {max_tokens_range}"
+    )
 
-def process_pdf(file):
-    pdf_text = ""
+
+
+
+
+# Display chat messages from history on app rerun
+for message in st.session_state.messages:
+    avatar = '🤖' if message["role"] == "assistant" else '👨‍💻'
+    with st.chat_message(message["role"], avatar=avatar):
+        st.markdown(message["content"])
+
+
+def generate_chat_responses(chat_completion) -> Generator[str, None, None]:
+    """Yield chat response content from the Groq API response."""
+    for chunk in chat_completion:
+        if chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
+
+
+if prompt := st.chat_input("Enter your prompt here..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Fetch response from Groq API
     try:
-        pdf = PyPDF2.PdfReader(file)
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                pdf_text += text
-            else:
-                # Use OCR to extract text from image
-                images = convert_from_path(file.name)
-                for image in images:
-                    pdf_text += pytesseract.image_to_string(image)
+        chat_completion = client.chat.completions.create(
+            model=model_option,
+            messages=[
+                {
+                    "role": m["role"],
+                    "content": m["content"]
+                }
+                for m in st.session_state.messages
+            ],
+            max_tokens=max_tokens,
+            stream=True
+        )
+
+        # Use the generator function with st.write_stream
+        with st.chat_message("assistant"):
+            chat_responses_generator = generate_chat_responses(chat_completion)
+            full_response = st.write_stream(chat_responses_generator)
     except Exception as e:
-        st.error(f"Error processing PDF: {e}")
-    return pdf_text
+        st.error(e, message="Error occurred")
 
-def process_docx(file):
-    doc = Document(file)
-    doc_text = ""
-    for para in doc.paragraphs:
-        doc_text += para.text + "\n"
-    return doc_text
-
-def process_pptx(file):
-    ppt = Presentation(file)
-    ppt_text = ""
-    for slide in ppt.slides:
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                ppt_text += shape.text + "\n"
-    return ppt_text
-
-def process_and_store_files(files):
-    texts = []
-    metadatas = []
-    for file in files:
-        if file.name not in st.session_state["processed_files"]:
-            if file.type == "application/pdf":
-                file_text = process_pdf(file)
-            elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                file_text = process_docx(file)
-            elif file.type == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
-                file_text = process_pptx(file)
-            else:
-                st.error(f"Unsupported file type: {file.type}")
-                continue
-
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=50)
-            file_texts = text_splitter.split_text(file_text)
-            if not file_texts:
-                st.error(f"No text found in {file.name}")
-                continue
-            texts.extend(file_texts)
-            file_metadatas = [{"source": f"{i}-{file.name}"} for i in range(len(file_texts))]
-            metadatas.extend(file_metadatas)
-
-            st.session_state["processed_files"][file.name] = {
-                "texts": file_texts,
-                "metadatas": file_metadatas
-            }
-        else:
-            data = st.session_state["processed_files"][file.name]
-            texts.extend(data["texts"])
-            metadatas.extend(data["metadatas"])
-
-    return texts, metadatas
-
-def initialize_chain(texts, metadatas):
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
-    docsearch = Chroma.from_texts(texts, embeddings, metadatas=metadatas)
-    message_history = ChatMessageHistory()
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        output_key="answer",
-        chat_memory=message_history,
-        return_messages=True,
-    )
-    chain = ConversationalRetrievalChain.from_llm(
-        llm=llm_groq,
-        chain_type="stuff",
-        retriever=docsearch.as_retriever(),
-        memory=memory,
-        return_source_documents=True,
-    )
-    return chain
-
-# Initialize session state if not already done
-if "chain" not in st.session_state:
-    st.session_state["chain"] = None
-if "uploaded_files" not in st.session_state:
-    st.session_state["uploaded_files"] = set()
-if "processed_files" not in st.session_state:
-    st.session_state["processed_files"] = {}
-if "image_displayed" not in st.session_state:
-    st.session_state["image_displayed"] = False
-
-# Add custom CSS for better UI
-st.markdown("""
-    <style>
-        .stTextArea textarea {
-            font-size: 14px;
-        }
-        .stButton button {
-            font-size: 14px;
-        }
-        .stFileUploader label {
-            font-size: 14px;
-        }
-        .stSidebar .css-1d391kg p {
-            font-size: 14px;
-        }
-        .small-image {
-            width: 50%;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-st.title("PDF Conversational AI")
-st.write("Upload PDF, Word, or PowerPoint files and ask questions about their content.")
-
-uploaded_files = st.file_uploader("Choose files", type=["pdf", "docx", "pptx"], accept_multiple_files=True)
-
-if uploaded_files:
-    new_files = [file for file in uploaded_files if file.name not in st.session_state["uploaded_files"]]
-    if new_files:
-        with st.spinner('Processing files...'):
-            texts, metadatas = process_and_store_files(new_files)
-            if texts:
-                if "texts" not in st.session_state:
-                    st.session_state["texts"] = []
-                if "metadatas" not in st.session_state:
-                    st.session_state["metadatas"] = []
-                st.session_state["texts"].extend(texts)
-                st.session_state["metadatas"].extend(metadatas)
-                st.session_state["chain"] = initialize_chain(st.session_state["texts"], st.session_state["metadatas"])
-                for file in new_files:
-                    st.session_state["uploaded_files"].add(file.name)
-                    c.execute("INSERT INTO uploaded_files (file_name) VALUES (?)", (file.name,))
-                conn.commit()
-                st.success("Files processed. You can now ask questions.")
-                # Display the image only once
-                if not st.session_state["image_displayed"]:
-                    st.image("pic.jpg", width=300, caption="Processing complete")
-                    st.session_state["image_displayed"] = True
+    # Append the full response to session_state.messages
+    if isinstance(full_response, str):
+        st.session_state.messages.append(
+            {"role": "assistant", "content": full_response})
     else:
-        texts = []
-        metadatas = []
-        for file_name, data in st.session_state["processed_files"].items():
-            texts.extend(data["texts"])
-            metadatas.extend(data["metadatas"])
-
-        if "texts" not in st.session_state:
-            st.session_state["texts"] = texts
-        if "metadatas" not in st.session_state:
-            st.session_state["metadatas"] = metadatas
-
-        st.session_state["chain"] = initialize_chain(st.session_state["texts"], st.session_state["metadatas"])
-
-st.write("### Ask a question about your uploaded files:")
-user_input = st.text_area("Type your message here...", height=100)
-if st.session_state["chain"]:
-    if st.button("Send"):
-        with st.spinner('Fetching the answer...'):
-            chain = st.session_state["chain"]
-            try:
-                res = chain(user_input)
-                answer = res["answer"]
-                source_documents = res["source_documents"]
-                if not answer:
-                    general_response = llm_groq.agenerate({"prompt": user_input})
-                    answer = general_response['choices'][0]['message']['content']
-
-                # Save the question and answer to session state
-                if "history" not in st.session_state:
-                    st.session_state["history"] = []
-                st.session_state["history"].append({"question": user_input, "answer": answer})
-
-                # Display the question and answer
-                st.write(f"**Q:** {user_input}")
-                st.write(f"**A:** {answer}")
-
-                # Save the question and answer to the database
-                c.execute("INSERT INTO chat_history (question, answer) VALUES (?, ?)", (user_input, answer))
-                conn.commit()
-            except Exception as e:
-                st.error(f"Failed to fetch the answer: {e}")
-
-# Sidebar for Chat History
-st.sidebar.write("### Chat History")
-if "history" in st.session_state:
-    for entry in st.session_state["history"]:
-        st.sidebar.write(f"**Q:** {entry['question']}")
-        st.sidebar.write(f"**A:** {entry['answer']}")
+        # Handle the case where full_response is not a string
+        combined_response = "\n".join(str(item) for item in full_response)
+        st.session_state.messages.append(
+            {"role": "assistant", "content": combined_response})
