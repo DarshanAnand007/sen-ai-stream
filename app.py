@@ -2,18 +2,12 @@ import streamlit as st
 from typing import Generator
 from groq import Groq
 
-st.set_page_config(page_icon="💬", layout="wide",
-                   page_title="SEN")
+st.set_page_config(page_icon="neural.png", layout="wide", page_title="SEN")
 
-
-
-
-st.subheader("SEN AI",  anchor=False)
+st.subheader("SEN AI", anchor=False)
 st.text("near real-time responses")
 
-client = Groq(
-    api_key=st.secrets["GROQ_API_KEY"],
-)
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 # Initialize chat history and selected model
 if "messages" not in st.session_state:
@@ -29,7 +23,6 @@ models = {
     "llama3-8b-8192": {"name": "LLaMA3 8b", "tokens": 8192, "developer": "Meta"},
     "mixtral-8x7b-32768": {"name": "Mixtral 8x7b", "tokens": 32768, "developer": "Mistral"},
 }
-
 
 with st.sidebar:
     st.title("Chat configuration")
@@ -57,16 +50,10 @@ with st.sidebar:
         help=f"Adjust the maximum number of tokens (words) for the model's response. Max for selected model: {max_tokens_range}"
     )
 
-
-
-
-
 # Display chat messages from history on app rerun
 for message in st.session_state.messages:
-    avatar = '🤖' if message["role"] == "assistant" else '👨‍💻'
-    with st.chat_message(message["role"], avatar=avatar):
-        st.markdown(message["content"])
-
+    role_name = "SEN-AI" if message["role"] == "assistant" else "SEN"
+    st.markdown(f"**{role_name}:** {message['content']}")
 
 def generate_chat_responses(chat_completion) -> Generator[str, None, None]:
     """Yield chat response content from the Groq API response."""
@@ -74,12 +61,10 @@ def generate_chat_responses(chat_completion) -> Generator[str, None, None]:
         if chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
-
 if prompt := st.chat_input("Enter your prompt here..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    st.markdown(f"**User:** {prompt}")
 
     # Fetch response from Groq API
     try:
@@ -97,11 +82,10 @@ if prompt := st.chat_input("Enter your prompt here..."):
         )
 
         # Use the generator function with st.write_stream
-        with st.chat_message("assistant"):
-            chat_responses_generator = generate_chat_responses(chat_completion)
-            full_response = st.write_stream(chat_responses_generator)
+        chat_responses_generator = generate_chat_responses(chat_completion)
+        full_response = st.write_stream(chat_responses_generator)
     except Exception as e:
-        st.error(e, message="Error occurred")
+        st.error(f"Error occurred: {e}")
 
     # Append the full response to session_state.messages
     if isinstance(full_response, str):
