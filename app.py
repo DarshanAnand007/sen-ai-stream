@@ -64,7 +64,7 @@ def generate_chat_responses(chat_completion) -> Generator[str, None, None]:
 if prompt := st.chat_input("Enter your prompt here..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    st.markdown(f"**User:** {prompt}")
+    st.markdown(f"**SEN:** {prompt}")
 
     # Fetch response from Groq API
     try:
@@ -81,6 +81,7 @@ if prompt := st.chat_input("Enter your prompt here..."):
             stream=True
         )
 
+        st.markdown("**SEN-AI:**")
         # Use the generator function with st.write_stream
         chat_responses_generator = generate_chat_responses(chat_completion)
         full_response = st.write_stream(chat_responses_generator)
