@@ -1,0 +1,14 @@
+PyPDF2
+pytesseract
+pdf2image
+streamlit
+python-pptx
+python-docx
+Pillow
+langchain-community
+langchain
+Chroma
+ollama
+langchain_groq
+chromadb 
+pysqlite3-binary
